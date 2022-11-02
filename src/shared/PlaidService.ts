@@ -9,6 +9,9 @@ class PlaidService {
     private settings:any;
     private plaidClient:PlaidApi;
 
+    // Flag to notify client if user needs to reauthenticate through Plaid.
+    private reauthRequired:boolean = false;
+
     constructor() { }
 
     async loadSettingsFrom (settings:AppSettings) {
@@ -30,7 +33,8 @@ class PlaidService {
                         itemId: fiKey.itemId,
                         detailInfo: await this.getFiInfo(fiKey.accessToken),
                         accounts: await this.getDepositAccounts(fiKey.accessToken),
-                        transactionSync: await this.transactionSync(fiKey)
+                        transactionSync: await this.transactionSync(fiKey),
+                        reauthRequired: this.reauthRequired
                     };
                 }));
     }
@@ -80,6 +84,7 @@ class PlaidService {
         let modified: Array<Transaction> = [];
         let removed: Array<RemovedTransaction> = [];
         let hasMore = true;
+        let data:TransactionsSyncResponse;
 
         // todo: just getting first page for now, eventually get all pages.
         // Iterate through each page of new transaction updates for item
@@ -88,8 +93,24 @@ class PlaidService {
                 access_token: fi.accessToken,
                 cursor: cursor,
             };
-            const response = await this.plaidClient.transactionsSync(request)
-            const data = response.data;
+
+            try {
+                const response = await this.plaidClient.transactionsSync(request);
+                data = response?.data;
+            } catch (error)
+            {
+                // todo: hookup logging middleware / log error.
+
+                // If the sync was unable to be completed, don't throw. A resync by resetting the cursor may be necessary.
+                return {
+                    request_id: "",
+                    added,
+                    modified,
+                    removed,
+                    has_more: false,
+                    next_cursor: ""
+                };
+            }
 
             // Add this page of results
             added = added.concat(data.added);
@@ -99,6 +120,7 @@ class PlaidService {
 
             // Update cursor to the next cursor
             cursor = data.next_cursor;
+            
         //}
 
         // Persist cursor and updated data
@@ -137,6 +159,12 @@ class PlaidService {
             const resp = await this.plaidClient.accountsGet(request);
             return resp?.data?.accounts;
         } catch (error) {
+            if (error.response.data.error_code === "ITEM_LOGIN_REQUIRED")
+            {
+                this.reauthRequired = true;
+                return [];
+            }
+
             throw new Error("Could not load accounts: " + error);
         }
     }
